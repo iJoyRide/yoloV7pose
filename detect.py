@@ -19,14 +19,14 @@ from utils.torch_utils import select_device, load_classifier, time_synchronized
 
 def detect(opt):
     source, weights, view_img, save_txt, imgsz, save_txt_tidl, kpt_label = opt.source, opt.weights, opt.view_img, opt.save_txt, opt.img_size, opt.save_txt_tidl, opt.kpt_label
-    save_img = not opt.nosave and not source.endswith('.txt')  # save inference images
+    #save_img = False  # Do not save inference images
     webcam = source.isnumeric() or source.endswith('.txt') or source.lower().startswith(
         ('rtsp://', 'rtmp://', 'http://', 'https://'))
 
     # Directories
-    save_dir = increment_path(Path(opt.project) / opt.name, exist_ok=opt.exist_ok)  # increment run
-    (save_dir / 'labels' if (save_txt or save_txt_tidl) else save_dir).mkdir(parents=True, exist_ok=True)  # make dir
-
+    output_base_dir = increment_path(Path(opt.project) / opt.name, exist_ok=opt.exist_ok)  # increment run
+    (output_base_dir / 'labels').mkdir(parents=True, exist_ok=True)  # make dir
+    
     # Initialize
     set_logging()
     device = select_device(opt.device)
@@ -64,6 +64,8 @@ def detect(opt):
     if device.type != 'cpu':
         model(torch.zeros(1, 3, imgsz, imgsz).to(device).type_as(next(model.parameters())))  # run once
     t0 = time.time()
+    input_base_dir = Path(opt.source)
+    
     for path, img, im0s, vid_cap in dataset:
         img = torch.from_numpy(img).to(device)
         img = img.half() if half else img.float()  # uint8 to fp16/32
@@ -82,6 +84,10 @@ def detect(opt):
         # Apply Classifier
         if classify:
             pred = apply_classifier(pred, modelc, img, im0s)
+            
+        relative_path = Path(path).relative_to(Path(opt.source).parent)
+        full_output_path = output_base_dir / relative_path.parent
+        full_output_path.mkdir(parents=True, exist_ok=True)  # Create the directory if it doesn't exist
 
         # Process detections
         for i, det in enumerate(pred):  # detections per image
@@ -91,13 +97,12 @@ def detect(opt):
                 p, s, im0, frame = path, '', im0s.copy(), getattr(dataset, 'frame', 0)
 
             p = Path(p)  # to Path
-            save_path = str(save_dir / p.name)  # img.jpg
-            txt_path = str(save_dir / 'labels' / p.stem) + ('' if dataset.mode == 'image' else f'_{frame}')  # img.txt
+            txt_path = str(full_output_path / (relative_path.stem + ('' if dataset.mode == 'image' else f'_{frame}'))) + '.txt'
             s += '%gx%g ' % img.shape[2:]  # print string
             gn = torch.tensor(im0.shape)[[1, 0, 1, 0]]  # normalization gain whwh
             if len(det):
                 # Rescale boxes from img_size to im0 size
-                scale_coords(img.shape[2:], det[:, :4], im0.shape, kpt_label=False)
+                scale_coords(img.shape[2:], det[:, :4], im0.shape, kpt_label=True)
                 scale_coords(img.shape[2:], det[:, 6:], im0.shape, kpt_label=kpt_label, step=3)
 
                 # Print results
@@ -105,71 +110,61 @@ def detect(opt):
                     n = (det[:, 5] == c).sum()  # detections per class
                     s += f"{n} {names[int(c)]}{'s' * (n > 1)}, "  # add to string
 
-                # Write results
-                for det_index, (*xyxy, conf, cls) in enumerate(reversed(det[:,:6])):
+                for det_index, (*xyxy, conf, cls) in enumerate(det[:,:6]):
+
                     if save_txt:  # Write to file
+                        
                         xywh = (xyxy2xywh(torch.tensor(xyxy).view(1, 4)) / gn).view(-1).tolist()  # normalized xywh
-                        line = (cls, *xywh, conf) if opt.save_conf else (cls, *xywh)  # label format
+                        kpts_copy = det[det_index, 6:].clone()
+                        steps = 3
+                        if kpt_label:
+                            for i in range(0, len(kpts_copy), steps):
+                                kpt_conf = kpts_copy[i + 2]
+                                if kpt_conf > 0.7:
+                                    kpts_copy[i + 2] = 2
+                                elif kpt_conf > 0.5:
+                                    kpts_copy[i + 2] = 1
+                                else:
+                                    kpts_copy[i + 2] = 0
+                                    kpts_copy[i] = 0.
+                                    kpts_copy[i + 1] = 0.
+                                    continue
+                                kpts_copy[i] /= im0.shape[1]
+                                kpts_copy[i + 1] /= im0.shape[0]
+                        line = None
+                        if opt.save_conf:
+                            if kpt_label:
+                                line = (cls, *xywh, conf, *kpts_copy)
+                            else:
+                                line = (cls, *xywh, conf)
+                        else:
+                            if kpt_label:
+                                line = (cls, *xywh, *kpts_copy)
+                            else:
+                                line = (cls, *xywh)  # label format
                         with open(txt_path + '.txt', 'a') as f:
                             f.write(('%g ' * len(line)).rstrip() % line + '\n')
+        # Print time (inference + NMS)
+        print(f'{s}Done. ({t2 - t1:.3f}s)')
 
-                    if save_img or opt.save_crop or view_img:  # Add bbox to image
-                        c = int(cls)  # integer class
-                        label = None if opt.hide_labels else (names[c] if opt.hide_conf else f'{names[c]} {conf:.2f}')
-                        kpts = det[det_index, 6:]
-                        plot_one_box(xyxy, im0, label=label, color=colors(c, True), line_thickness=opt.line_thickness, kpt_label=kpt_label, kpts=kpts, steps=3, orig_shape=im0.shape[:2])
-                        if opt.save_crop:
-                            save_one_box(xyxy, im0s, file=save_dir / 'crops' / names[c] / f'{p.stem}.jpg', BGR=True)
+        # Stream results
+        if view_img:
+            cv2.imshow(str(p), im0)
+            cv2.waitKey(1)  # 1 millisecond
 
-
-                if save_txt_tidl:  # Write to file in tidl dump format
-                    for *xyxy, conf, cls in det_tidl:
-                        xyxy = torch.tensor(xyxy).view(-1).tolist()
-                        line = (conf, cls,  *xyxy) if opt.save_conf else (cls, *xyxy)  # label format
-                        with open(txt_path + '.txt', 'a') as f:
-                            f.write(('%g ' * len(line)).rstrip() % line + '\n')
-
-            # Print time (inference + NMS)
-            print(f'{s}Done. ({t2 - t1:.3f}s)')
-
-            # Stream results
-            if view_img:
-                cv2.imshow(str(p), im0)
-                cv2.waitKey(1)  # 1 millisecond
-
-            # Save results (image with detections)
-            if save_img:
-                if dataset.mode == 'image':
-                    cv2.imwrite(save_path, im0)
-                else:  # 'video' or 'stream'
-                    if vid_path != save_path:  # new video
-                        vid_path = save_path
-                        if isinstance(vid_writer, cv2.VideoWriter):
-                            vid_writer.release()  # release previous video writer
-                        if vid_cap:  # video
-                            fps = vid_cap.get(cv2.CAP_PROP_FPS)
-                            w = int(vid_cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-                            h = int(vid_cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-                        else:  # stream
-                            fps, w, h = 30, im0.shape[1], im0.shape[0]
-                            save_path += '.mp4'
-                        vid_writer = cv2.VideoWriter(save_path, cv2.VideoWriter_fourcc(*'mp4v'), fps, (w, h))
-                    vid_writer.write(im0)
-
-    if save_txt or save_txt_tidl or save_img:
-        s = f"\n{len(list(save_dir.glob('labels/*.txt')))} labels saved to {save_dir / 'labels'}" if save_txt or save_txt_tidl else ''
+    if save_txt or save_txt_tidl:
+        s = f"\n{len(list(save_dir.glob('labels/*.txt')))} labels saved to {save_dir / 'labels'}"
         print(f"Results saved to {save_dir}{s}")
 
     print(f'Done. ({time.time() - t0:.3f}s)')
-
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--weights', nargs='+', type=str, default='yolov5s.pt', help='model.pt path(s)')
     parser.add_argument('--source', type=str, default='data/images', help='source')  # file/folder, 0 for webcam
     parser.add_argument('--img-size', nargs= '+', type=int, default=640, help='inference size (pixels)')
-    parser.add_argument('--conf-thres', type=float, default=0.25, help='object confidence threshold')
-    parser.add_argument('--iou-thres', type=float, default=0.45, help='IOU threshold for NMS')
+    parser.add_argument('--conf-thres', type=float, default=0.35, help='object confidence threshold')
+    parser.add_argument('--iou-thres', type=float, default=0.25, help='IOU threshold for NMS')
     parser.add_argument('--device', default='', help='cuda device, i.e. 0 or 0,1,2,3 or cpu')
     parser.add_argument('--view-img', action='store_true', help='display results')
     parser.add_argument('--save-txt', action='store_true', help='save results to *.txt')
@@ -200,3 +195,5 @@ if __name__ == '__main__':
                 strip_optimizer(opt.weights)
         else:
             detect(opt=opt)
+            
+#python detect.py --weights yolov7-w6-pose.pt --kpt-label --save-txt --source "\\192.168.77.100\Model_Center\Yolo\YoloV8CY\yolov8pose\data\images\val\extra_set_val\set1" --device 0
