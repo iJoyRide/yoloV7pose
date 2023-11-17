@@ -47,42 +47,38 @@ def process_file_pair(source_a_file, source_b_file, target_directory, source_b_p
         print(f"Copied {source_b_file} to {target_file}")
 
 
-async def process_files_in_batches(executor, source_a_files, source_b_files, target_directory,source_b_path):
+async def process_files_in_batches(executor, source_a_files, source_b_files, target_directory, source_b_path):
     loop = asyncio.get_running_loop()
 
-    # Split the source_b_files into chunks of 20
-    for i in range(0, len(source_b_files), 20):  # Process in batches of 20
+    for i in range(0, len(source_b_files), 20):
         batch = source_b_files[i:i + 20]
-        print(f"Processing batch {i // 20 + 1}")
-
         tasks = []
         for source_b_file in batch:
-            relative_filename = os.path.basename(source_b_file)
-            source_a_file = source_a_files.get(relative_filename)
+            relative_path = os.path.relpath(source_b_file, source_b_path)
+            source_a_file = source_a_files.get(relative_path)
 
-            # Run the process_file_pair function in the thread pool
             task = loop.run_in_executor(
                 executor, process_file_pair, source_a_file, source_b_file, target_directory, source_b_path
             )
             tasks.append(task)
 
-        # Wait for all tasks in the batch to complete
         await asyncio.gather(*tasks)
+
         print(f"Finished batch {i // 20 + 1}")
 
 
 async def main():
-    source_a_path = r"/app/Desktop/yolov7_cy/runs/detect/exp5"
-    source_b_path = r"/app/Desktop/yolov7_cy/runs/detect/exp6"
-    target_directory = r"/app/data/labels/train/extra_set_train"
     
-    # source_a_path = r"/app/Desktop/yolov7pose/runs/detect/out"
-    # source_b_path = r"/app/Desktop/yolov7pose/runs/detect/exp2/extra_set_train"
-    # target_directory = r"/app/data/labels/train/extra_set_train"
+    # source_a_path = r"/app/Desktop/yolov7pose/runs/detect/exp7/extra_set_val"
+    # source_b_path = r"/app/Desktop/yolov7_cy/runs/detect/exp7"
+    # target_directory = r"/app/Desktop/yolov7pose/runs/detect/that"
     
-    
+    source_a_path = r"/app/Desktop/yolov7_cy/runs/detect/exp8"
+    source_b_path = r"/app/Desktop/yolov7pose/runs/detect/that"
+    target_directory = r"/app/data/labels/val/extra_set_val"
+
     # Get a list of txt files in source A
-    source_a_files = {os.path.basename(os.path.join(dp, f)): os.path.join(dp, f)
+    source_a_files = {os.path.relpath(os.path.join(dp, f), source_a_path): os.path.join(dp, f)
                       for dp, dn, filenames in os.walk(source_a_path) for f in filenames if f.endswith('.txt')}
     print(f"Found {len(source_a_files)} files in source A.")
 
@@ -93,15 +89,12 @@ async def main():
     # Sort the files in source B to maintain order
     source_b_files.sort(key=sort_key)
 
-    # Now it's safe to print the number of files
     print(f"Number of files in source A: {len(source_a_files)}")
     print(f"Number of files in source B: {len(source_b_files)}")
 
-    # Create a thread pool executor
     with ThreadPoolExecutor() as executor:
         await process_files_in_batches(executor, source_a_files, source_b_files, target_directory, source_b_path)
-        
-# Make sure the asyncio.run is only called when the script is executed directly
+
 if __name__ == "__main__":
     print("Starting to process files in batches.")
     asyncio.run(main())
